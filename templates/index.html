@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Torque Pro Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         body { background-color: #f0f2f5; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .navbar { background: linear-gradient(90deg, #2c3e50 0%, #000000 100%); }
@@ -24,6 +26,8 @@
         .sensor-row { transition: background-color 0.3s; }
         .sensor-row:hover { background-color: #f8f9fa !important; }
         .editable-name:hover { cursor: pointer; text-decoration: underline; color: #0d6efd; }
+        #map { height: 350px; border-radius: 12px; }
+        .osc-container { background: #000; border-radius: 12px; padding: 10px; }
     </style>
 </head>
 <body>
@@ -42,6 +46,9 @@
         <ul class="nav nav-tabs mb-4" id="dashboardTabs" role="tablist">
             <li class="nav-item">
                 <button class="nav-link active" id="viz-tab" data-bs-toggle="tab" data-bs-target="#viz-content" type="button">📊 Visualización</button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link" id="map-tab" data-bs-toggle="tab" data-bs-target="#map-content" type="button">🗺️ Mapa y Osciloscopio</button>
             </li>
             <li class="nav-item">
                 <button class="nav-link" id="logs-tab" data-bs-toggle="tab" data-bs-target="#logs-content" type="button">📋 Registros Crudos</button>
@@ -109,6 +116,38 @@
                             </div>
                             <div class="card-body">
                                 <canvas id="historyChart" style="height: 300px;"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pestaña de Mapa y Osciloscopio -->
+            <div class="tab-pane fade" id="map-content">
+                <div class="row">
+                    <div class="col-lg-8">
+                        <div class="card">
+                            <div class="card-header">📍 Seguimiento GPS y Velocidad</div>
+                            <div class="card-body p-0">
+                                <div id="map"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-4">
+                        <div class="card">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <span>⚡ Osciloscopio (Inyectores)</span>
+                                <select id="osc-sensor-select" class="form-select form-select-sm" style="width: auto;">
+                                    <option value="kff124d">AFR</option>
+                                    <option value="k10">Manifold Pressure</option>
+                                    <option value="kc">RPM</option>
+                                </select>
+                            </div>
+                            <div class="card-body osc-container">
+                                <canvas id="oscChart" style="height: 300px;"></canvas>
+                            </div>
+                            <div class="card-footer small text-muted">
+                                Simulación de señal de alta frecuencia.
                             </div>
                         </div>
                     </div>
@@ -202,11 +241,24 @@
         };
 
         let historyChart = null;
+        let oscChart = null;
+        let map = null;
+        let mapMarker = null;
+        let mapPath = L.polyline([], {color: '#0d6efd', weight: 3}).addTo(L.layerGroup());
+        let lastMapUpdate = 0;
         let lastTimestamp = null;
         const detectedPidsByVehicle = {}; 
 
         function getSensorInfo(pid) {
             return PID_MAP[pid] || { name: pid, unit: '' };
+        }
+
+        function initMap() {
+            map = L.map('map').setView([0, 0], 2);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap'
+            }).addTo(map);
+            mapPath.addTo(map);
         }
 
         function initChart() {
@@ -232,6 +284,32 @@
                     scales: {
                         x: { display: true, grid: { display: false } },
                         y: { beginAtZero: false }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            const oscCtx = document.getElementById('oscChart').getContext('2d');
+            oscChart = new Chart(oscCtx, {
+                type: 'line',
+                data: {
+                    labels: Array(50).fill(''),
+                    datasets: [{
+                        label: 'Señal',
+                        data: Array(50).fill(0),
+                        borderColor: '#00ff88',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    scales: {
+                        x: { display: false },
+                        y: { grid: { color: '#333' }, ticks: { color: '#00ff88' } }
                     },
                     plugins: { legend: { display: false } }
                 }
@@ -282,8 +360,10 @@
 
                 // Actualizar UI
                 renderDetectedSensors();
-                updateGauges(processedData[processedData.length - 1]);
+                updateGauges(latestLog);
                 updateChart(processedData);
+                updateOscilloscope(latestLog);
+                updateMap(latestLog);
                 updateLogsTable(processedData, sessionToProfile);
 
             } catch (error) {
@@ -324,6 +404,41 @@
                 const info = getSensorInfo(selectedPid);
                 historyChart.data.datasets[0].label = `${info.name} (${info.unit})`;
                 historyChart.update('none');
+            }
+        }
+
+        function updateOscilloscope(lastLog) {
+            if (!oscChart || !lastLog || !lastLog.args) return;
+            const pid = document.getElementById('osc-sensor-select').value;
+            const val = parseFloat(lastLog.args[pid]) || 0;
+            
+            oscChart.data.datasets[0].data.push(val);
+            oscChart.data.datasets[0].data.shift();
+            oscChart.update('none');
+        }
+
+        function updateMap(lastLog) {
+            if (!map || !lastLog || !lastLog.args) return;
+            const lat = parseFloat(lastLog.args.kff1006);
+            const lon = parseFloat(lastLog.args.kff1005);
+            const speed = lastLog.args.kd || lastLog.args.kff1001 || 0;
+
+            if (isNaN(lat) || isNaN(lon) || lat === 0) return;
+
+            const pos = [lat, lon];
+            if (!mapMarker) {
+                mapMarker = L.marker(pos).addTo(map);
+                map.setView(pos, 15);
+            } else {
+                mapMarker.setLatLng(pos);
+            }
+            mapMarker.bindPopup(`<b>Velocidad:</b> ${speed} km/h`).openPopup();
+
+            // Agregar punto al camino cada 30 segundos
+            const now = Date.now();
+            if (now - lastMapUpdate > 30000) {
+                mapPath.addLatLng(pos);
+                lastMapUpdate = now;
             }
         }
 
@@ -382,9 +497,15 @@
             const container = document.getElementById('sensors-container');
             if (Object.keys(detectedPidsByVehicle).length === 0) return;
 
+            // Guardar posiciones de scroll de los contenedores de PIDs
+            const scrollPositions = {};
+            container.querySelectorAll('.card-body').forEach((el, index) => {
+                scrollPositions[index] = el.scrollTop;
+            });
+
             container.innerHTML = '';
             
-            for (const [vehicle, pids] of Object.entries(detectedPidsByVehicle)) {
+            Object.entries(detectedPidsByVehicle).forEach(([vehicle, pids], index) => {
                 const vehicleCard = document.createElement('div');
                 vehicleCard.className = 'col-md-6 col-lg-4 mb-4';
                 
@@ -402,7 +523,7 @@
                             <div class="editable-name" onclick="openEditModal('${pid}')">
                                 <span class="me-2">${icon}</span>
                                 <span class="fw-bold">${info.name}</span>
-                                <br><small class="text-muted">[${pid}] - ${pids[pid]} ${info.unit}</small>
+                                <br><small class="text-muted">[${pid}] ${info.unit}</small>
                             </div>
                             <span class="badge ${badgeClass}">${pids[pid]}</span>
                         </div>
@@ -421,15 +542,27 @@
                     </div>
                 `;
                 container.appendChild(vehicleCard);
-            }
+                
+                // Restaurar scroll
+                if (scrollPositions[index] !== undefined) {
+                    vehicleCard.querySelector('.card-body').scrollTop = scrollPositions[index];
+                }
+            });
         }
 
         // Inicializar
         document.addEventListener('DOMContentLoaded', () => {
             initChart();
+            initMap();
             fetchLogs();
             document.getElementById('refresh-btn').addEventListener('click', () => fetchLogs());
             document.getElementById('chart-sensor-select').addEventListener('change', () => fetchLogs(true));
+            
+            // Forzar actualización del mapa al cambiar de pestaña
+            document.getElementById('map-tab').addEventListener('shown.bs.tab', () => {
+                if (map) map.invalidateSize();
+            });
+
             setInterval(() => fetchLogs(true), 5000);
         });
     </script>
