@@ -41,6 +41,7 @@
                         <thead class="table-light">
                             <tr>
                                 <th>Fecha/Hora</th>
+                                <th>Vehículo (ID)</th>
                                 <th>IP Remota</th>
                                 <th>Parámetros (PIDs)</th>
                             </tr>
@@ -66,16 +67,34 @@
                 const body = document.getElementById('logs-body');
                 body.innerHTML = '';
 
-                data.reverse().forEach(log => {
+                let previousKeys = new Set();
+                
+                // Procesar datos para detectar llaves nuevas cronológicamente
+                const processedData = data.map(log => {
+                    const currentKeys = new Set(Object.keys(log.args).filter(k => k !== 'id'));
+                    const newKeys = new Set([...currentKeys].filter(k => !previousKeys.has(k)));
+                    previousKeys = currentKeys;
+                    return { ...log, _newKeys: newKeys };
+                });
+
+                // Renderizar del más nuevo al más antiguo
+                processedData.reverse().forEach(log => {
                     const row = document.createElement('tr');
-                    
-                    // Formatear parámetros para que sean legibles
-                    const params = Object.entries(log.args)
-                        .map(([k, v]) => `<span class="badge bg-secondary me-1">${k}: ${v}</span>`)
+                    const vehicleId = log.args.id || 'Desconocido';
+                    const displayArgs = { ...log.args };
+                    delete displayArgs.id;
+
+                    const params = Object.entries(displayArgs)
+                        .map(([k, v]) => {
+                            const isNew = log._newKeys.has(k);
+                            const badgeClass = isNew ? 'bg-success' : 'bg-secondary';
+                            return `<span class="badge ${badgeClass} me-1" title="Valor: ${v}">${k}: ${v}</span>`;
+                        })
                         .join(' ');
 
                     row.innerHTML = `
                         <td>${new Date(log.timestamp).toLocaleString()}</td>
+                        <td><span class="badge bg-info text-dark">${vehicleId}</span></td>
                         <td><small class="text-muted">${log.remote_addr}</small></td>
                         <td class="log-entry">${params || '<span class="text-muted">Sin datos</span>'}</td>
                     `;
@@ -83,7 +102,6 @@
                 });
             } catch (error) {
                 console.error('Error fetching logs:', error);
-                alert('Error al cargar los datos');
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '🔄 Actualizar Datos';
@@ -91,12 +109,9 @@
         }
 
         document.getElementById('refresh-btn').addEventListener('click', fetchLogs);
-
-        // Cargar datos al iniciar
         fetchLogs();
-
-        // Actualización automática cada 30 segundos
         setInterval(fetchLogs, 30000);
     </script>
 </body>
 </html>
+
