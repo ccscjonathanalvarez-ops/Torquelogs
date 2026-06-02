@@ -40,9 +40,9 @@
                     <table class="table table-hover mb-0">
                         <thead class="table-light">
                             <tr>
+                                <th>Perfil (Vehículo)</th>
                                 <th>Fecha/Hora</th>
-                                <th>Vehículo (ID)</th>
-                                <th>IP Remota</th>
+                                <th>Sesión</th>
                                 <th>Parámetros (PIDs)</th>
                             </tr>
                         </thead>
@@ -67,22 +67,38 @@
                 const body = document.getElementById('logs-body');
                 body.innerHTML = '';
 
+                // Mapeo para recordar qué Perfil pertenece a cada Sesión
+                const sessionToProfile = {};
                 let previousKeys = new Set();
                 
-                // Procesar datos para detectar llaves nuevas cronológicamente
+                // 1. Procesar datos cronológicamente para mapear sesiones y detectar PIDs nuevos
                 const processedData = data.map(log => {
-                    const currentKeys = new Set(Object.keys(log.args).filter(k => k !== 'id'));
+                    // Rastrear nombre de perfil (se envía solo al inicio de la sesión)
+                    if (log.args.profileName) {
+                        sessionToProfile[log.args.session] = log.args.profileName;
+                    }
+
+                    // Detectar llaves nuevas (PIDs)
+                    const currentKeys = new Set(Object.keys(log.args).filter(k => 
+                        !['id', 'session', 'profileName', 'eml', 'v'].includes(k)
+                    ));
                     const newKeys = new Set([...currentKeys].filter(k => !previousKeys.has(k)));
                     previousKeys = currentKeys;
+
                     return { ...log, _newKeys: newKeys };
                 });
 
-                // Renderizar del más nuevo al más antiguo
+                // 2. Renderizar del más nuevo al más antiguo
                 processedData.reverse().forEach(log => {
                     const row = document.createElement('tr');
-                    const vehicleId = log.args.id || 'Desconocido';
+                    
+                    // Recuperar el nombre del perfil desde nuestro mapa de sesiones
+                    const profileName = sessionToProfile[log.args.session] || '---';
+                    const sessionId = log.args.session || '---';
+
+                    // Filtrar parámetros técnicos para la lista de PIDs
                     const displayArgs = { ...log.args };
-                    delete displayArgs.id;
+                    ['id', 'session', 'profileName', 'eml', 'v'].forEach(k => delete displayArgs[k]);
 
                     const params = Object.entries(displayArgs)
                         .map(([k, v]) => {
@@ -93,10 +109,10 @@
                         .join(' ');
 
                     row.innerHTML = `
-                        <td>${new Date(log.timestamp).toLocaleString()}</td>
-                        <td><span class="badge bg-info text-dark">${vehicleId}</span></td>
-                        <td><small class="text-muted">${log.remote_addr}</small></td>
-                        <td class="log-entry">${params || '<span class="text-muted">Sin datos</span>'}</td>
+                        <td><strong class="text-primary">${profileName}</strong></td>
+                        <td><small>${new Date(log.timestamp).toLocaleString()}</small></td>
+                        <td><span class="badge bg-light text-dark border">${sessionId}</span></td>
+                        <td class="log-entry">${params || '<span class="text-muted">Sin datos de sensores</span>'}</td>
                     `;
                     body.appendChild(row);
                 });
