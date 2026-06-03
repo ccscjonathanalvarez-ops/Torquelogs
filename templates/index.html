@@ -36,6 +36,7 @@
             <span class="navbar-brand mb-0 h1">🚗 TORQUE<span class="text-primary">LOG</span></span>
             <div class="d-flex align-items-center">
                 <span class="status-online me-3">● LIVE</span>
+                <button id="export-btn" class="btn btn-outline-light btn-sm me-2" onclick="exportLogs()">💾 Exportar TXT</button>
                 <button id="refresh-btn" class="btn btn-primary btn-sm">🔄 Sincronizar</button>
             </div>
         </div>
@@ -120,6 +121,10 @@
                             </div>
                             <div class="card-body">
                                 <canvas id="historyChart" style="height: 300px;"></canvas>
+                                <div class="mt-3 px-2">
+                                    <label class="form-label small text-muted">Desplazar Historial:</label>
+                                    <input type="range" class="form-range" id="history-scroll" min="0" max="100" value="100">
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -152,6 +157,9 @@
                             </div>
                             <div class="card-body osc-container">
                                 <canvas id="oscChart" style="height: 300px;"></canvas>
+                                <div class="mt-2">
+                                    <input type="range" class="form-range" id="osc-scroll" min="0" max="100" value="100">
+                                </div>
                             </div>
                             <div class="card-footer small text-muted">
                                 Simulación de señal de alta frecuencia.
@@ -264,6 +272,7 @@
         let mapPath = L.polyline([], {color: '#0d6efd', weight: 3}).addTo(L.layerGroup());
         let lastMapUpdate = 0;
         let lastTimestamp = null;
+        let fullData = []; // Guardar todo el historial para exportar y desplazar
         const detectedPidsByVehicle = {}; 
 
         function getSensorInfo(pid) {
@@ -376,9 +385,10 @@
                 });
 
                 // Actualizar UI
+                fullData = processedData;
                 renderDetectedSensors();
                 updateGauges(latestLog);
-                updateChart(processedData);
+                updateChart(); // Quitamos el argumento para usar fullData global
                 updateOscilloscope(latestLog);
                 updateMap(latestLog);
                 updateLogsTable(processedData, sessionToProfile);
@@ -401,13 +411,22 @@
             document.getElementById('gauge-load').innerText = Math.round(parseFloat(lastLog.args.k5) || 0);
         }
 
-        function updateChart(processedData) {
+        function updateChart() {
+            if (fullData.length === 0) return;
             const selectedPid = document.getElementById('chart-sensor-select').value;
+            const scrollVal = parseInt(document.getElementById('history-scroll').value);
+            
+            // Calcular ventana de visualización (30 puntos)
+            const windowSize = 30;
+            const maxIdx = fullData.length;
+            const endIdx = Math.max(windowSize, Math.floor((scrollVal / 100) * maxIdx));
+            const startIdx = Math.max(0, endIdx - windowSize);
+            
+            const displayData = fullData.slice(startIdx, endIdx);
             const chartLabels = [];
             const chartValues = [];
             
-            const recentData = processedData.slice(-30);
-            recentData.forEach(log => {
+            displayData.forEach(log => {
                 if (log.args[selectedPid] !== undefined) {
                     const time = new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                     chartLabels.push(time);
@@ -425,13 +444,51 @@
         }
 
         function updateOscilloscope(lastLog) {
-            if (!oscChart || !lastLog || !lastLog.args) return;
-            const pid = document.getElementById('osc-sensor-select').value;
-            const val = parseFloat(lastLog.args[pid]) || 0;
+            if (!oscChart || fullData.length === 0) return;
             
-            oscChart.data.datasets[0].data.push(val);
-            oscChart.data.datasets[0].data.shift();
+            const pid = document.getElementById('osc-sensor-select').value;
+            const scrollVal = parseInt(document.getElementById('osc-scroll').value);
+            const isLive = scrollVal >= 98; // Si el slider está al final, es tiempo real
+
+            if (isLive && lastLog && lastLog.args) {
+                const val = parseFloat(lastLog.args[pid]) || 0;
+                oscChart.data.datasets[0].data.push(val);
+                oscChart.data.datasets[0].data.shift();
+            } else {
+                // Modo historial: Mostrar ventana de 50 puntos según el slider
+                const windowSize = 50;
+                const maxIdx = fullData.length;
+                const endIdx = Math.max(windowSize, Math.floor((scrollVal / 100) * maxIdx));
+                const startIdx = Math.max(0, endIdx - windowSize);
+                
+                const historyWindow = fullData.slice(startIdx, endIdx);
+                const values = historyWindow.map(log => parseFloat(log.args[pid]) || 0);
+                
+                // Rellenar con ceros si hay pocos datos
+                while(values.length < windowSize) values.unshift(0);
+                
+                oscChart.data.datasets[0].data = values;
+            }
+            
             oscChart.update('none');
+        }
+
+        function exportLogs() {
+            if (fullData.length === 0) {
+                alert("No hay datos para exportar.");
+                return;
+            }
+            
+            const content = fullData.map(log => JSON.stringify(log)).join('\n');
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `torque_logs_${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
         }
 
         function updateMap(lastLog) {
@@ -578,8 +635,13 @@
             initMap();
             fetchLogs();
             document.getElementById('refresh-btn').addEventListener('click', () => fetchLogs());
-            document.getElementById('chart-sensor-select').addEventListener('change', () => fetchLogs(true));
+            document.getElementById('chart-sensor-select').addEventListener('change', () => updateChart());
+            document.getElementById('osc-sensor-select').addEventListener('change', () => updateOscilloscope());
             
+            // Eventos para sliders
+            document.getElementById('history-scroll').addEventListener('input', () => updateChart());
+            document.getElementById('osc-scroll').addEventListener('input', () => updateOscilloscope());
+
             // Forzar actualización del mapa al cambiar de pestaña
             document.getElementById('map-tab').addEventListener('shown.bs.tab', () => {
                 if (map) map.invalidateSize();
