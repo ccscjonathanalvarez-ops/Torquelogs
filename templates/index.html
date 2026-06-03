@@ -54,6 +54,8 @@
             <span class="navbar-brand mb-0 h1">🚗 TORQUE<span class="text-primary">LOG</span></span>
             <div class="d-flex align-items-center">
                 <span class="status-online me-3">● LIVE</span>
+                <input type="file" id="import-input" style="display: none;" accept=".txt,.jsonl" onchange="handleImport(this)">
+                <button id="import-btn" class="btn btn-outline-light btn-sm me-2" onclick="document.getElementById('import-input').click()">📂 Importar</button>
                 <button id="export-btn" class="btn btn-outline-light btn-sm me-2" onclick="exportLogs()">💾 Exportar TXT</button>
                 <button id="refresh-btn" class="btn btn-primary btn-sm">🔄 Sincronizar</button>
             </div>
@@ -292,6 +294,7 @@
         let lastMapUpdate = 0;
         let lastTimestamp = null;
         let fullData = []; // Guardar todo el historial para exportar y desplazar
+        let isImportedMode = false;
         const detectedPidsByVehicle = {}; 
 
         function getSensorInfo(pid) {
@@ -362,6 +365,8 @@
         }
 
         async function fetchLogs(isAuto = false) {
+            if (isImportedMode && isAuto) return; // No auto-refresh if we are in imported mode
+
             const btn = document.getElementById('refresh-btn');
             const originalText = btn.innerHTML;
             if (!isAuto) {
@@ -378,39 +383,18 @@
                 // Solo actualizar si hay datos nuevos para evitar parpadeos
                 const latestLog = data[data.length - 1];
                 if (isAuto && lastTimestamp === latestLog.timestamp) return;
-                lastTimestamp = latestLog.timestamp;
-
-                const sessionToProfile = {};
-                let previousKeys = new Set();
                 
-                const processedData = data.map(log => {
-                    if (log.args.profileName) sessionToProfile[log.args.session] = log.args.profileName;
-                    const vehicle = sessionToProfile[log.args.session] || 'Desconocido';
-                    
-                    if (!detectedPidsByVehicle[vehicle]) detectedPidsByVehicle[vehicle] = {};
+                if (isImportedMode && !isAuto) {
+                    if (!confirm("Estás viendo datos importados. ¿Deseas volver a los datos en vivo?")) {
+                        return;
+                    }
+                    isImportedMode = false;
+                    document.querySelector('.status-online').innerHTML = '● LIVE';
+                    document.querySelector('.status-online').style.color = '#00ff88';
+                }
 
-                    const currentKeys = new Set(Object.keys(log.args).filter(k => 
-                        !['id', 'session', 'profileName', 'eml', 'v', 'time'].includes(k)
-                    ));
-
-                    currentKeys.forEach(k => {
-                        detectedPidsByVehicle[vehicle][k] = log.args[k];
-                    });
-
-                    const newKeys = new Set([...currentKeys].filter(k => !previousKeys.has(k)));
-                    previousKeys = currentKeys;
-
-                    return { ...log, _newKeys: newKeys };
-                });
-
-                // Actualizar UI
-                fullData = processedData;
-                renderDetectedSensors();
-                updateGauges(latestLog);
-                updateChart(); // Quitamos el argumento para usar fullData global
-                updateOscilloscope(latestLog);
-                updateMap(latestLog);
-                updateLogsTable(processedData, sessionToProfile);
+                lastTimestamp = latestLog.timestamp;
+                processAndDisplayData(data);
 
             } catch (error) {
                 console.error('Error fetching logs:', error);
@@ -420,6 +404,64 @@
                     btn.innerHTML = originalText;
                 }
             }
+        }
+
+        function processAndDisplayData(data) {
+            if (data.length === 0) return;
+
+            const sessionToProfile = {};
+            let previousKeys = new Set();
+            
+            // Limpiar PIDs detectados para reconstruirlos con los nuevos datos
+            for (let key in detectedPidsByVehicle) delete detectedPidsByVehicle[key];
+
+            const processedData = data.map(log => {
+                if (log.args.profileName) sessionToProfile[log.args.session] = log.args.profileName;
+                const vehicle = sessionToProfile[log.args.session] || 'Desconocido';
+                
+                if (!detectedPidsByVehicle[vehicle]) detectedPidsByVehicle[vehicle] = {};
+
+                const currentKeys = new Set(Object.keys(log.args).filter(k => 
+                    !['id', 'session', 'profileName', 'eml', 'v', 'time'].includes(k)
+                ));
+
+                currentKeys.forEach(k => {
+                    detectedPidsByVehicle[vehicle][k] = log.args[k];
+                });
+
+                const newKeys = new Set([...currentKeys].filter(k => !previousKeys.has(k)));
+                previousKeys = currentKeys;
+
+                return { ...log, _newKeys: newKeys };
+            });
+
+            const latestLog = processedData[processedData.length - 1];
+            
+            // Reconstruir camino en el mapa si es un import o carga inicial grande
+            if (map && (isImportedMode || fullData.length === 0)) {
+                mapPath.setLatLngs([]);
+                let lastPathUpdate = 0;
+                processedData.forEach(log => {
+                    const lat = parseFloat(log.args.kff1006);
+                    const lon = parseFloat(log.args.kff1005);
+                    if (!isNaN(lat) && !isNaN(lon) && lat !== 0) {
+                        const ts = new Date(log.timestamp).getTime();
+                        if (ts - lastPathUpdate > 30000) { // Un punto cada 30 seg
+                            mapPath.addLatLng([lat, lon]);
+                            lastPathUpdate = ts;
+                        }
+                    }
+                });
+            }
+
+            // Actualizar UI
+            fullData = processedData;
+            renderDetectedSensors();
+            updateGauges(latestLog);
+            updateChart();
+            updateOscilloscope(latestLog);
+            updateMap(latestLog);
+            updateLogsTable(processedData, sessionToProfile);
         }
 
         function updateGauges(lastLog) {
@@ -507,6 +549,42 @@
             a.click();
             window.URL.revokeObjectURL(url);
             document.body.removeChild(a);
+        }
+
+        function handleImport(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const content = e.target.result;
+                const lines = content.split('\n');
+                const importedData = [];
+
+                lines.forEach(line => {
+                    if (line.trim()) {
+                        try {
+                            importedData.push(JSON.parse(line));
+                        } catch (err) {
+                            console.error("Error parsing line:", line, err);
+                        }
+                    }
+                });
+
+                if (importedData.length > 0) {
+                    isImportedMode = true;
+                    document.querySelector('.status-online').innerHTML = '● IMPORTADO';
+                    document.querySelector('.status-online').style.color = '#ffcc00';
+                    processAndDisplayData(importedData);
+                    alert(`Se han importado ${importedData.length} registros.`);
+                } else {
+                    alert("No se encontraron datos válidos en el archivo.");
+                }
+                
+                // Reset input
+                input.value = '';
+            };
+            reader.readAsText(file);
         }
 
         function updateMap(lastLog) {
